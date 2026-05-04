@@ -2,10 +2,11 @@ mod entropy;
 mod ingest;
 mod lpc;
 
-use entropy::{encode_frame, BitWriter};
+use rayon::prelude::*;
 
-use ingest::{Frame, MappedAudio};
-use lpc::{analyze_frame, DEFAULT_ORDER};
+use entropy::{encode_frame, BitWriter};
+use ingest::MappedAudio;
+use lpc::DEFAULT_ORDER;
 
 fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| {
@@ -43,63 +44,117 @@ fn main() {
     }
     println!();
 
+    // ── Phase 4 : L'Assaut des Cœurs (Multithreading) ────────────────────
+    let mut bit_writer = BitWriter::new();
+    
+    let i16_samples = match audio.samples() {
+        ingest::SampleSlice::I16(s) => s,
+        ingest::SampleSlice::F32(_) => {
+            eprintln!("Format f32 non supporté par le moteur LPC (i16 requis)");
+            std::process::exit(1);
+        }
+    };
+    
+    struct FrameResult {
+        signal_energy: f64,
+        residual_energy: f64,
+        uncompressed_bits: usize,
+        compressed_bits: usize,
+        writer: BitWriter,
+        log_line: Option<String>,
+    }
+
+    // Map-Reduce Lock-Free via rayon
+    let results: Vec<FrameResult> = i16_samples
+        .par_chunks(frame_size)
+        .enumerate()
+        .map(|(i, samples)| {
+            let mut writer = BitWriter::new();
+            
+            if samples.len() <= DEFAULT_ORDER {
+                return FrameResult {
+                    signal_energy: 0.0,
+                    residual_energy: 0.0,
+                    uncompressed_bits: 0,
+                    compressed_bits: 0,
+                    writer,
+                    log_line: if i < 3 || i == frame_count - 1 {
+                        Some(format!("  Frame [{i:>5}] : frame trop courte — skip"))
+                    } else {
+                        None
+                    },
+                };
+            }
+            
+            match lpc::analyze_frame(samples, DEFAULT_ORDER) {
+                Some(analysis) => {
+                    let sig_e: f64 = samples.iter().map(|&s| (s as f64).powi(2)).sum();
+                    let res_e: f64 = analysis.residual.iter().map(|&r| (r as f64).powi(2)).sum();
+                    
+                    let uncompressed_bits = samples.len() * 16;
+                    let (k, compressed_bits) = encode_frame(&analysis.residual, &mut writer);
+                    
+                    let log_line = if i < 3 || i == frame_count - 1 {
+                        let ratio = if sig_e > 0.0 { res_e / sig_e } else { 0.0 };
+                        let compression_ratio = compressed_bits as f64 / uncompressed_bits as f64 * 100.0;
+                        Some(format!(
+                            "  Frame [{i:>5}] : coeffs=[{:.4}, {:.4}, {:.4}, ...] | erreur_pred={:.1} | énergie résidu/signal={:.4} | k={k} ({compression_ratio:.1}%)",
+                            analysis.coefficients.coeffs[0],
+                            analysis.coefficients.coeffs[1],
+                            analysis.coefficients.coeffs[2],
+                            analysis.coefficients.prediction_error,
+                            ratio
+                        ))
+                    } else if i == 3 {
+                        Some("  ...".to_string())
+                    } else {
+                        None
+                    };
+
+                    FrameResult {
+                        signal_energy: sig_e,
+                        residual_energy: res_e,
+                        uncompressed_bits,
+                        compressed_bits,
+                        writer,
+                        log_line,
+                    }
+                }
+                None => FrameResult {
+                    signal_energy: 0.0,
+                    residual_energy: 0.0,
+                    uncompressed_bits: 0,
+                    compressed_bits: 0,
+                    writer,
+                    log_line: if i < 3 || i == frame_count - 1 {
+                        Some(format!("  Frame [{i:>5}] : silence/instable — skip"))
+                    } else {
+                        None
+                    },
+                }
+            }
+        })
+        .collect();
+
+    // Agrégation Séquentielle Déterministe
     let mut total_signal_energy = 0.0f64;
     let mut total_residual_energy = 0.0f64;
-    let mut analyzed = 0usize;
-    
-    // ── Phase 3 : L'Étau Entropique ──────────────────────────────────────
-    let mut bit_writer = BitWriter::new();
     let mut total_uncompressed_bits = 0usize;
     let mut total_compressed_bits = 0usize;
+    let mut analyzed = 0usize;
 
-    for (i, frame) in audio.frames(frame_size).enumerate() {
-        let samples = match &frame {
-            Frame::I16(s) => *s,
-            Frame::F32(_) => {
-                eprintln!("  Frame [{i}] : format f32 non supporté par le moteur LPC (i16 requis)");
-                continue;
-            }
-        };
-
-        if samples.len() <= DEFAULT_ORDER {
-            continue; // Frame trop courte pour l'analyse LPC.
+    for res in results {
+        if let Some(line) = res.log_line {
+            println!("{}", line);
         }
-
-        match analyze_frame(samples, DEFAULT_ORDER) {
-            Some(analysis) => {
-                let sig_e: f64 = samples.iter().map(|&s| (s as f64).powi(2)).sum();
-                let res_e: f64 = analysis.residual.iter().map(|&r| (r as f64).powi(2)).sum();
-                total_signal_energy += sig_e;
-                total_residual_energy += res_e;
-                analyzed += 1;
-                
-                // Encodage Golomb-Rice (Phase 3)
-                let uncompressed_bits = samples.len() * 16;
-                let (k, compressed_bits) = encode_frame(&analysis.residual, &mut bit_writer);
-                
-                total_uncompressed_bits += uncompressed_bits;
-                total_compressed_bits += compressed_bits;
-
-                if i < 3 || i == frame_count - 1 {
-                    let ratio = if sig_e > 0.0 { res_e / sig_e } else { 0.0 };
-                    let compression_ratio = compressed_bits as f64 / uncompressed_bits as f64 * 100.0;
-                    println!(
-                        "  Frame [{i:>5}] : coeffs=[{:.4}, {:.4}, {:.4}, ...] | erreur_pred={:.1} | énergie résidu/signal={:.4} | k={k} ({compression_ratio:.1}%)",
-                        analysis.coefficients.coeffs[0],
-                        analysis.coefficients.coeffs[1],
-                        analysis.coefficients.coeffs[2],
-                        analysis.coefficients.prediction_error,
-                        ratio,
-                    );
-                } else if i == 3 {
-                    println!("  ...");
-                }
-            }
-            None => {
-                if i < 3 || i == frame_count - 1 {
-                    println!("  Frame [{i:>5}] : silence/instable — skip");
-                }
-            }
+        
+        if res.uncompressed_bits > 0 {
+            analyzed += 1;
+            total_signal_energy += res.signal_energy;
+            total_residual_energy += res.residual_energy;
+            total_uncompressed_bits += res.uncompressed_bits;
+            total_compressed_bits += res.compressed_bits;
+            bit_writer.append_bits(&res.writer);
         }
     }
     

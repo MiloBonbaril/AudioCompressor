@@ -170,42 +170,7 @@ impl<'a> SampleSlice<'a> {
 // Framing iterator — zero-copy chunking
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Itérateur de frames zero-copy.
-///
-/// Chaque frame est un sous-slice du mmap original.
-/// La dernière frame peut être plus courte que `frame_size`.
-#[derive(Debug)]
-pub enum FrameIterator<'a> {
-    I16(std::slice::Chunks<'a, i16>),
-    F32(std::slice::Chunks<'a, f32>),
-}
 
-/// Une frame — sous-slice typé d'échantillons.
-#[derive(Debug)]
-pub enum Frame<'a> {
-    I16(&'a [i16]),
-    F32(&'a [f32]),
-}
-
-impl<'a> Frame<'a> {
-    pub fn len(&self) -> usize {
-        match self {
-            Frame::I16(s) => s.len(),
-            Frame::F32(s) => s.len(),
-        }
-    }
-}
-
-impl<'a> Iterator for FrameIterator<'a> {
-    type Item = Frame<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            FrameIterator::I16(chunks) => chunks.next().map(Frame::I16),
-            FrameIterator::F32(chunks) => chunks.next().map(Frame::F32),
-        }
-    }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MappedAudio — the zero-copy beast
@@ -321,16 +286,7 @@ impl MappedAudio {
         (self.sample_count() + frame_size - 1) / frame_size
     }
 
-    /// Découpage virtuel en frames zero-copy.
-    ///
-    /// Chaque frame est un sous-slice de `frame_size` échantillons.
-    /// La dernière frame peut contenir moins d'échantillons.
-    pub fn frames(&self, frame_size: usize) -> FrameIterator<'_> {
-        match self.samples() {
-            SampleSlice::I16(s) => FrameIterator::I16(s.chunks(frame_size)),
-            SampleSlice::F32(s) => FrameIterator::F32(s.chunks(frame_size)),
-        }
-    }
+
 
     /// Durée totale en secondes.
     pub fn duration_secs(&self) -> f64 {
@@ -428,32 +384,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_framing() {
-        let samples: Vec<i16> = (0..10000).collect();
-        let wav = make_test_wav(&samples, 44100, 1);
-        let path = write_temp_wav("test_frames.wav", &wav);
-
-        let audio = MappedAudio::open(&path).unwrap();
-        let frame_size = 4096;
-
-        let frames: Vec<_> = audio.frames(frame_size).collect();
-        // 10000 / 4096 = 2 full frames + 1 remainder (1808 samples)
-        assert_eq!(frames.len(), 3);
-
-        match &frames[0] {
-            Frame::I16(s) => assert_eq!(s.len(), 4096),
-            _ => panic!("expected i16 frame"),
-        }
-        match &frames[1] {
-            Frame::I16(s) => assert_eq!(s.len(), 4096),
-            _ => panic!("expected i16 frame"),
-        }
-        match &frames[2] {
-            Frame::I16(s) => assert_eq!(s.len(), 10000 - 2 * 4096),
-            _ => panic!("expected i16 frame"),
-        }
-    }
 
     #[test]
     fn test_stereo_duration() {

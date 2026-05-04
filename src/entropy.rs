@@ -88,6 +88,23 @@ impl BitWriter {
     pub fn bytes_written(&self) -> usize {
         self.buffer.len() + ((self.bits_in_acc + 7) / 8) as usize
     }
+
+    /// Ajoute le contenu complet d'un autre BitWriter dans celui-ci.
+    /// Indispensable pour l'agrégation multithread sans perte ni padding.
+    pub fn append_bits(&mut self, other: &BitWriter) {
+        // On récupère les octets complets du buffer
+        for &byte in &other.buffer {
+            self.write_bits(byte as u64, 8);
+        }
+        
+        // On récupère les bits résiduels bloqués dans l'accumulateur
+        if other.bits_in_acc > 0 {
+            // L'accumulateur stocke les bits alignés à gauche (MSB).
+            // Pour extraire la valeur brute, on décale vers la droite.
+            let val = other.accumulator >> (64 - other.bits_in_acc);
+            self.write_bits(val, other.bits_in_acc);
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -189,6 +206,20 @@ mod tests {
         assert_eq!(bw.buffer[7], 0xFE); 
         // Le 9ème octet a reçu les bits '11' du 0b1011, alignés à gauche (1100_0000 = 0xC0)
         assert_eq!(bw.buffer[8], 0xC0);
+    }
+
+    #[test]
+    fn test_bitwriter_append() {
+        let mut bw1 = BitWriter::new();
+        bw1.write_bits(0b101, 3);
+        
+        let mut bw2 = BitWriter::new();
+        bw2.write_bits(0b0110, 4);
+        
+        bw1.append_bits(&bw2);
+        bw1.flush();
+        
+        assert_eq!(bw1.buffer[0], 0xAC); // 1010 1100
     }
 
     #[test]

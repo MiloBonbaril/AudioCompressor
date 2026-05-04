@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 memmap2 = "0.9"
+rayon = "1.10"
 thiserror = "2"
