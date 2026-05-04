@@ -1,5 +1,8 @@
+mod entropy;
 mod ingest;
 mod lpc;
+
+use entropy::{encode_frame, BitWriter};
 
 use ingest::{Frame, MappedAudio};
 use lpc::{analyze_frame, DEFAULT_ORDER};
@@ -43,6 +46,11 @@ fn main() {
     let mut total_signal_energy = 0.0f64;
     let mut total_residual_energy = 0.0f64;
     let mut analyzed = 0usize;
+    
+    // ── Phase 3 : L'Étau Entropique ──────────────────────────────────────
+    let mut bit_writer = BitWriter::new();
+    let mut total_uncompressed_bits = 0usize;
+    let mut total_compressed_bits = 0usize;
 
     for (i, frame) in audio.frames(frame_size).enumerate() {
         let samples = match &frame {
@@ -64,11 +72,19 @@ fn main() {
                 total_signal_energy += sig_e;
                 total_residual_energy += res_e;
                 analyzed += 1;
+                
+                // Encodage Golomb-Rice (Phase 3)
+                let uncompressed_bits = samples.len() * 16;
+                let (k, compressed_bits) = encode_frame(&analysis.residual, &mut bit_writer);
+                
+                total_uncompressed_bits += uncompressed_bits;
+                total_compressed_bits += compressed_bits;
 
                 if i < 3 || i == frame_count - 1 {
                     let ratio = if sig_e > 0.0 { res_e / sig_e } else { 0.0 };
+                    let compression_ratio = compressed_bits as f64 / uncompressed_bits as f64 * 100.0;
                     println!(
-                        "  Frame [{i:>5}] : coeffs=[{:.4}, {:.4}, {:.4}, ...] | erreur_pred={:.1} | énergie résidu/signal={:.4}",
+                        "  Frame [{i:>5}] : coeffs=[{:.4}, {:.4}, {:.4}, ...] | erreur_pred={:.1} | énergie résidu/signal={:.4} | k={k} ({compression_ratio:.1}%)",
                         analysis.coefficients.coeffs[0],
                         analysis.coefficients.coeffs[1],
                         analysis.coefficients.coeffs[2],
@@ -86,18 +102,33 @@ fn main() {
             }
         }
     }
+    
+    // Aligner le dernier octet du BitWriter
+    bit_writer.flush();
 
     println!();
+    println!("=== Résumé ===");
     if total_signal_energy > 0.0 {
         let global_ratio = total_residual_energy / total_signal_energy;
+        let global_compression = total_compressed_bits as f64 / total_uncompressed_bits as f64 * 100.0;
+        
         println!(
-            "Résumé : {analyzed}/{frame_count} frames analysées | ratio énergie résidu/signal global = {global_ratio:.6}"
+            "Analysé        : {analyzed}/{frame_count} frames"
         );
         println!(
-            "         → réduction de prédiction = {:.2} dB",
+            "Moteur LPC     : Réduction de l'énergie de prédiction = {:.2} dB",
             -10.0 * global_ratio.log10()
         );
+        println!(
+            "Entropie (Rice): Compression à {:.1}% de la taille brute (Ratio final: {:.2}x)",
+            global_compression,
+            total_uncompressed_bits as f64 / total_compressed_bits as f64
+        );
+        println!(
+            "BitWriter      : Buffer final de {} octets générés",
+            bit_writer.bytes_written()
+        );
     } else {
-        println!("Résumé : signal nul (silence total)");
+        println!("Signal nul (silence total)");
     }
 }
