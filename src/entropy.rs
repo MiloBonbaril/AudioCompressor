@@ -105,6 +105,93 @@ impl BitWriter {
             self.write_bits(val, other.bits_in_acc);
         }
     }
+
+    /// Écrit un `f64` sous forme binaire.
+    #[inline(always)]
+    pub fn write_f64(&mut self, val: f64) {
+        self.write_bits(val.to_bits(), 64);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BitReader
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub struct BitReader<'a> {
+    buffer: &'a [u8],
+    byte_pos: usize,
+    accumulator: u128,
+    bits_in_acc: u8,
+}
+
+impl<'a> BitReader<'a> {
+    pub fn new(buffer: &'a [u8]) -> Self {
+        Self {
+            buffer,
+            byte_pos: 0,
+            accumulator: 0,
+            bits_in_acc: 0,
+        }
+    }
+
+    /// Lit `count` bits depuis le flux (max 64).
+    #[inline(always)]
+    pub fn read_bits(&mut self, count: u8) -> u64 {
+        if count == 0 {
+            return 0;
+        }
+
+        // Si on n'a pas assez de bits dans l'accumulateur, on en charge
+        while self.bits_in_acc < count && self.byte_pos < self.buffer.len() {
+            self.accumulator |= (self.buffer[self.byte_pos] as u128) << (120 - self.bits_in_acc);
+            self.bits_in_acc += 8;
+            self.byte_pos += 1;
+        }
+
+        let actual_count = count.min(self.bits_in_acc);
+        if actual_count == 0 {
+            return 0; // EOF complet
+        }
+
+        let result = (self.accumulator >> (128 - actual_count)) as u64;
+        self.accumulator <<= actual_count;
+        self.bits_in_acc -= actual_count;
+
+        result
+    }
+
+    /// Lit jusqu'à trouver un `0`, et retourne le nombre de `1` rencontrés.
+    #[inline(always)]
+    pub fn read_unary(&mut self) -> u32 {
+        let mut count = 0;
+        loop {
+            if self.bits_in_acc == 0 && self.byte_pos < self.buffer.len() {
+                self.accumulator = (self.buffer[self.byte_pos] as u128) << 120;
+                self.bits_in_acc = 8;
+                self.byte_pos += 1;
+            }
+            if self.bits_in_acc == 0 {
+                break; // EOF
+            }
+
+            let bit = self.accumulator >> 127;
+            self.accumulator <<= 1;
+            self.bits_in_acc -= 1;
+
+            if bit == 1 {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        count
+    }
+
+    /// Lit un `f64` sérialisé.
+    #[inline(always)]
+    pub fn read_f64(&mut self) -> f64 {
+        f64::from_bits(self.read_bits(64))
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -116,6 +203,12 @@ impl BitWriter {
 #[inline(always)]
 pub fn zigzag_encode(val: i32) -> u32 {
     ((val << 1) ^ (val >> 31)) as u32
+}
+
+/// Décodage ZigZag
+#[inline(always)]
+pub fn zigzag_decode(val: u32) -> i32 {
+    ((val >> 1) as i32) ^ (-((val & 1) as i32))
 }
 
 /// Déduit instantanément le paramètre Rice `k` optimal en fonction de la moyenne.
@@ -143,13 +236,13 @@ pub fn optimal_rice_parameter(zigzag_values: &[u32]) -> u8 {
 
 /// Compresse un vecteur de résidus dans le BitWriter.
 /// Retourne `(paramètre k utilisé, nombre de bits écrits)`.
-pub fn encode_frame(residuals: &[f32], writer: &mut BitWriter) -> (u8, usize) {
+pub fn encode_frame(residuals: &[i32], writer: &mut BitWriter) -> (u8, usize) {
     let start_bits = writer.buffer.len() * 8 + writer.bits_in_acc as usize;
 
-    // 1. Casting vers i32 puis ZigZag
+    // 1. ZigZag
     let mut zigzags = Vec::with_capacity(residuals.len());
     for &r in residuals {
-        zigzags.push(zigzag_encode(r.round() as i32));
+        zigzags.push(zigzag_encode(r));
     }
 
     // 2. Analyse de variance (moyenne absolue)
@@ -259,7 +352,7 @@ mod tests {
 
     #[test]
     fn test_encode_frame() {
-        let residuals = vec![0.0, -1.0, 1.0, -2.0, 2.0];
+        let residuals = vec![0, -1, 1, -2, 2];
         let mut bw = BitWriter::new();
         let (k, bits) = encode_frame(&residuals, &mut bw);
         

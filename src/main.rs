@@ -68,67 +68,43 @@ fn main() {
         .map(|(i, samples)| {
             let mut writer = BitWriter::new();
             
-            if samples.len() <= DEFAULT_ORDER {
-                return FrameResult {
-                    signal_energy: 0.0,
-                    residual_energy: 0.0,
-                    uncompressed_bits: 0,
-                    compressed_bits: 0,
-                    writer,
-                    log_line: if i < 3 || i == frame_count - 1 {
-                        Some(format!("  Frame [{i:>5}] : frame trop courte — skip"))
-                    } else {
-                        None
-                    },
-                };
+            let analysis = lpc::analyze_frame(samples, DEFAULT_ORDER);
+            
+            // Écriture des coefficients LPC de la frame avant le résidu
+            for &c in &analysis.coefficients.coeffs {
+                writer.write_f64(c);
             }
             
-            match lpc::analyze_frame(samples, DEFAULT_ORDER) {
-                Some(analysis) => {
-                    let sig_e: f64 = samples.iter().map(|&s| (s as f64).powi(2)).sum();
-                    let res_e: f64 = analysis.residual.iter().map(|&r| (r as f64).powi(2)).sum();
-                    
-                    let uncompressed_bits = samples.len() * 16;
-                    let (k, compressed_bits) = encode_frame(&analysis.residual, &mut writer);
-                    
-                    let log_line = if i < 3 || i == frame_count - 1 {
-                        let ratio = if sig_e > 0.0 { res_e / sig_e } else { 0.0 };
-                        let compression_ratio = compressed_bits as f64 / uncompressed_bits as f64 * 100.0;
-                        Some(format!(
-                            "  Frame [{i:>5}] : coeffs=[{:.4}, {:.4}, {:.4}, ...] | erreur_pred={:.1} | énergie résidu/signal={:.4} | k={k} ({compression_ratio:.1}%)",
-                            analysis.coefficients.coeffs[0],
-                            analysis.coefficients.coeffs[1],
-                            analysis.coefficients.coeffs[2],
-                            analysis.coefficients.prediction_error,
-                            ratio
-                        ))
-                    } else if i == 3 {
-                        Some("  ...".to_string())
-                    } else {
-                        None
-                    };
+            let sig_e: f64 = samples.iter().map(|&s| (s as f64).powi(2)).sum();
+            let res_e: f64 = analysis.residual.iter().map(|&r| (r as f64).powi(2)).sum();
+            
+            let uncompressed_bits = samples.len() * 16;
+            let (k, compressed_bits) = encode_frame(&analysis.residual, &mut writer);
+            
+            let log_line = if i < 3 || i == frame_count - 1 {
+                let ratio = if sig_e > 0.0 { res_e / sig_e } else { 0.0 };
+                let compression_ratio = compressed_bits as f64 / uncompressed_bits as f64 * 100.0;
+                Some(format!(
+                    "  Frame [{i:>5}] : coeffs=[{:.4}, {:.4}, {:.4}, ...] | erreur_pred={:.1} | énergie résidu/signal={:.4} | k={k} ({compression_ratio:.1}%)",
+                    analysis.coefficients.coeffs.get(0).unwrap_or(&0.0),
+                    analysis.coefficients.coeffs.get(1).unwrap_or(&0.0),
+                    analysis.coefficients.coeffs.get(2).unwrap_or(&0.0),
+                    analysis.coefficients.prediction_error,
+                    ratio
+                ))
+            } else if i == 3 {
+                Some("  ...".to_string())
+            } else {
+                None
+            };
 
-                    FrameResult {
-                        signal_energy: sig_e,
-                        residual_energy: res_e,
-                        uncompressed_bits,
-                        compressed_bits,
-                        writer,
-                        log_line,
-                    }
-                }
-                None => FrameResult {
-                    signal_energy: 0.0,
-                    residual_energy: 0.0,
-                    uncompressed_bits: 0,
-                    compressed_bits: 0,
-                    writer,
-                    log_line: if i < 3 || i == frame_count - 1 {
-                        Some(format!("  Frame [{i:>5}] : silence/instable — skip"))
-                    } else {
-                        None
-                    },
-                }
+            FrameResult {
+                signal_energy: sig_e,
+                residual_energy: res_e,
+                uncompressed_bits,
+                compressed_bits,
+                writer,
+                log_line,
             }
         })
         .collect();
@@ -185,10 +161,12 @@ fn main() {
         let compressed_path = format!("{}.acmp", path);
         let header = ArchiveHeader {
             sample_rate: audio.header.sample_rate,
+            channels: audio.header.channels,
             frame_size: frame_size as u32,
             lpc_order: DEFAULT_ORDER as u8,
             total_frames: frame_count as u32,
             data_size: bit_writer.buffer.len() as u64,
+            total_samples: audio.sample_count() as u64,
         };
         
         match sarcophagus::write_archive(&compressed_path, &header, &bit_writer.buffer) {

@@ -236,14 +236,14 @@ pub fn levinson_durbin(autocorr: &[f64], order: usize) -> Option<LpcCoefficients
 /// Pour n < order, les échantillons hors-limites (x[négatif]) sont traités comme 0.
 /// Le résidu a une dynamique plus faible que le signal original — c'est tout
 /// l'intérêt de la prédiction linéaire pour la compression.
-pub fn compute_residual(samples: &[i16], lpc: &LpcCoefficients) -> Vec<f32> {
+pub fn compute_residual(samples: &[i16], lpc: &LpcCoefficients) -> Vec<i32> {
     let n = samples.len();
     let order = lpc.order;
     let coeffs = &lpc.coeffs;
     let mut residual = Vec::with_capacity(n);
 
     for i in 0..n {
-        let sample = samples[i] as f64;
+        let sample = samples[i] as i32;
         let mut prediction = 0.0f64;
 
         // Σ a[k] · x[n-k] pour k=1..order, en protégeant les bords.
@@ -252,7 +252,8 @@ pub fn compute_residual(samples: &[i16], lpc: &LpcCoefficients) -> Vec<f32> {
             prediction += coeffs[k] * samples[i - 1 - k] as f64;
         }
 
-        residual.push((sample - prediction) as f32);
+        let pred_i16 = prediction.round() as i16;
+        residual.push(sample - pred_i16 as i32);
     }
 
     residual
@@ -268,7 +269,7 @@ pub struct LpcAnalysis {
     /// Coefficients LPC + erreur de prédiction.
     pub coefficients: LpcCoefficients,
     /// Résidu (erreurs de prédiction), même taille que la frame d'entrée.
-    pub residual: Vec<f32>,
+    pub residual: Vec<i32>,
 }
 
 /// Analyse LPC complète d'une frame i16.
@@ -277,23 +278,35 @@ pub struct LpcAnalysis {
 /// 2. Levinson-Durbin
 /// 3. Génération du résidu
 ///
-/// Retourne `None` si le signal est nul (silence) ou instable.
-pub fn analyze_frame(samples: &[i16], order: usize) -> Option<LpcAnalysis> {
+/// Ne retourne jamais `None` : en cas d'instabilité ou frame trop courte,
+/// renvoie des coefficients à 0.0 (prédiction nulle).
+pub fn analyze_frame(samples: &[i16], order: usize) -> LpcAnalysis {
     assert!(order <= MAX_ORDER, "order {order} exceeds MAX_ORDER {MAX_ORDER}");
-    assert!(
-        samples.len() > order,
-        "frame too short ({}) for order {order}",
-        samples.len()
-    );
 
-    let autocorr = autocorrelation(samples, order);
-    let coefficients = levinson_durbin(&autocorr, order)?;
+    let coefficients = if samples.len() <= order {
+        LpcCoefficients {
+            coeffs: vec![0.0; order],
+            order,
+            prediction_error: 0.0,
+        }
+    } else {
+        let autocorr = autocorrelation(samples, order);
+        match levinson_durbin(&autocorr, order) {
+            Some(c) => c,
+            None => LpcCoefficients {
+                coeffs: vec![0.0; order],
+                order,
+                prediction_error: 0.0,
+            }
+        }
+    };
+
     let residual = compute_residual(samples, &coefficients);
 
-    Some(LpcAnalysis {
+    LpcAnalysis {
         coefficients,
         residual,
-    })
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -381,17 +394,17 @@ mod tests {
     #[test]
     fn test_residual_constant_signal() {
         let samples: Vec<i16> = vec![1000; 256];
-        let analysis = analyze_frame(&samples, 1).unwrap();
+        let analysis = analyze_frame(&samples, 1);
 
         // Premier échantillon : pas de prédiction → résidu = signal.
-        assert!((analysis.residual[0] - 1000.0).abs() < 1e-3);
+        assert!((analysis.residual[0] - 1000).abs() < 2);
 
         // Le coefficient LPC est ~0.996, donc le résidu est ~3.9, pas 0.
         // Mais il doit être très petit par rapport au signal (1000).
         for i in 1..256 {
             assert!(
-                analysis.residual[i].abs() < 5.0,
-                "residual[{i}] = {} (expected < 5.0)",
+                analysis.residual[i].abs() < 5,
+                "residual[{i}] = {} (expected < 5)",
                 analysis.residual[i]
             );
         }
@@ -404,7 +417,7 @@ mod tests {
             .map(|i| (((i as f64) * 0.1).sin() * 10000.0) as i16)
             .collect();
 
-        let analysis = analyze_frame(&samples, DEFAULT_ORDER).unwrap();
+        let analysis = analyze_frame(&samples, DEFAULT_ORDER);
         assert_eq!(analysis.coefficients.order, DEFAULT_ORDER);
         assert_eq!(analysis.coefficients.coeffs.len(), DEFAULT_ORDER);
         assert_eq!(analysis.residual.len(), 4096);
@@ -419,7 +432,7 @@ mod tests {
             .map(|i| (((i as f64) * 2.0 * std::f64::consts::PI / 100.0).sin() * 15000.0) as i16)
             .collect();
 
-        let analysis = analyze_frame(&samples, DEFAULT_ORDER).unwrap();
+        let analysis = analyze_frame(&samples, DEFAULT_ORDER);
 
         let signal_energy: f64 = samples.iter().map(|&s| (s as f64).powi(2)).sum();
         let residual_energy: f64 = analysis.residual.iter().map(|&r| (r as f64).powi(2)).sum();

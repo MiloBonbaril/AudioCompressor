@@ -15,10 +15,12 @@ use std::path::Path;
 #[derive(Debug)]
 pub struct ArchiveHeader {
     pub sample_rate: u32,
+    pub channels: u16,
     pub frame_size: u32,
     pub lpc_order: u8,
     pub total_frames: u32,
     pub data_size: u64,
+    pub total_samples: u64,
 }
 
 /// Écrit l'archive complète sur le disque dur.
@@ -27,11 +29,13 @@ pub struct ArchiveHeader {
 /// [0..4]   Magic Number "ACMP"
 /// [4..5]   Version (1)
 /// [5..9]   Sample Rate (u32)
-/// [9..13]  Frame Size (u32)
-/// [13..14] LPC Order (u8)
-/// [14..18] Total Frames (u32)
-/// [18..26] Data Size en octets (u64)
-/// [26..]   Payload binaire compressée (BitWriter.buffer)
+/// [9..11]  Channels (u16)
+/// [11..15] Frame Size (u32)
+/// [15..16] LPC Order (u8)
+/// [16..20] Total Frames (u32)
+/// [20..28] Data Size en octets (u64)
+/// [28..36] Total Samples (u64)
+/// [36..]   Payload binaire compressée (BitWriter.buffer)
 pub fn write_archive(
     path: impl AsRef<Path>,
     header: &ArchiveHeader,
@@ -47,10 +51,12 @@ pub fn write_archive(
     
     // Métadonnées (Little Endian strict pour la portabilité)
     writer.write_all(&header.sample_rate.to_le_bytes())?;
+    writer.write_all(&header.channels.to_le_bytes())?;
     writer.write_all(&header.frame_size.to_le_bytes())?;
     writer.write_all(&header.lpc_order.to_le_bytes())?;
     writer.write_all(&header.total_frames.to_le_bytes())?;
     writer.write_all(&header.data_size.to_le_bytes())?;
+    writer.write_all(&header.total_samples.to_le_bytes())?;
     
     // Payload brutal
     writer.write_all(bitstream)?;
