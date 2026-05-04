@@ -1,12 +1,9 @@
-mod entropy;
-mod ingest;
-mod lpc;
-
 use rayon::prelude::*;
 
-use entropy::{encode_frame, BitWriter};
-use ingest::MappedAudio;
-use lpc::DEFAULT_ORDER;
+use audio_compressor::entropy::{encode_frame, BitWriter};
+use audio_compressor::ingest::{MappedAudio, SampleSlice};
+use audio_compressor::lpc::{self, DEFAULT_ORDER};
+use audio_compressor::sarcophagus::{self, ArchiveHeader};
 
 fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| {
@@ -48,8 +45,8 @@ fn main() {
     let mut bit_writer = BitWriter::new();
     
     let i16_samples = match audio.samples() {
-        ingest::SampleSlice::I16(s) => s,
-        ingest::SampleSlice::F32(_) => {
+        SampleSlice::I16(s) => s,
+        SampleSlice::F32(_) => {
             eprintln!("Format f32 non supporté par le moteur LPC (i16 requis)");
             std::process::exit(1);
         }
@@ -183,6 +180,21 @@ fn main() {
             "BitWriter      : Buffer final de {} octets générés",
             bit_writer.bytes_written()
         );
+        
+        // ── Phase 5 : Le Sarcophage Binaire ───────────────────────────────
+        let compressed_path = format!("{}.acmp", path);
+        let header = ArchiveHeader {
+            sample_rate: audio.header.sample_rate,
+            frame_size: frame_size as u32,
+            lpc_order: DEFAULT_ORDER as u8,
+            total_frames: frame_count as u32,
+            data_size: bit_writer.buffer.len() as u64,
+        };
+        
+        match sarcophagus::write_archive(&compressed_path, &header, &bit_writer.buffer) {
+            Ok(_) => println!("Sarcophage     : Fichier écrit avec succès dans {}", compressed_path),
+            Err(e) => eprintln!("Sarcophage     : Erreur d'écriture -> {}", e),
+        }
     } else {
         println!("Signal nul (silence total)");
     }
